@@ -4,10 +4,11 @@ if (!sessionStorage.getItem("cpcc_session")) {
 }
 </script>
 
+
 <!DOCTYPE html>
 <html>
 <head>
-<title>LJC CPCC System v3.9.3</title>
+<title>LJC CPCC System v4.1.1</title>
 
 <!-- Inter Font -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -661,8 +662,8 @@ body.history-open #historyContainer {
   /* ===== DATA ===== */
   let _cl = {};
   let _c = {};
-  let _u = null;
-  let _f = false;
+  window._u = null;
+  window._f = false;
 
   /* ===== HELPERS ===== */
   function _mk(d){
@@ -676,63 +677,6 @@ body.history-open #historyContainer {
       : customerSelect.value;
   }
 
-  /* ===== CPCC UPDATE ===== */
-  async function _uc(){
-    const k = _cn();
-    if (!k || !date.value) {
-      alert("Select customer & date");
-      return;
-    }
-
-    total.innerHTML = "Updating CPCC...";
-
-    let r;
-    try {
-      r = await fetch(
-        "https://script.google.com/macros/s/AKfycbx_X4V7r0jkSfaW45ZQI9En7fkLJ2yE7iwcZQQcFUvAThTKco2DiKteyuD3vhFXnMG-/exec"
-      );
-    } catch {
-      alert("Failed to reach CPCC server.");
-      return;
-    }
-
-    let j;
-    try {
-      j = await r.json();
-    } catch {
-      alert("Invalid response from CPCC server.");
-      return;
-    }
-
-    const d = Array.isArray(j)
-      ? j
-      : Array.isArray(j.cpccData)
-        ? j.cpccData
-        : [];
-
-    if (!d.length) {
-      _u = 0;
-      _r();
-      _f = true;
-      return;
-    }
-
-    const m = _mk(date.value);
-    _u = 0;
-
-    d.forEach(e => {
-      const rc = e.customer;
-      const rd = e.date;
-      const rt = Number(e.cpccPart ?? e.lineTotal ?? 0);
-
-      if (rc === k && _mk(rd) === m) {
-        _u += rt;
-      }
-    });
-
-    _r();
-    _f = true;
-  }
 
   /* ===== USERS ===== */
   window._ucb = function (d) {
@@ -829,6 +773,9 @@ body.history-open #historyContainer {
       <b>To be Paid in Cash: ₱${cs.toFixed(2)}</b><hr>
     `;
   }
+
+  window._r = _r;   // 🔑 expose renderer globally
+
 
   /* ===== CART ===== */
   window.addItem = function(i){
@@ -970,9 +917,19 @@ body.history-open #historyContainer {
 
     if (!_f) {
       alert("CPCC not yet updated.\nSystem will sync now.");
-      await _uc();
+      await new Promise(resolve => {
+        const old = _f;
+        window._uc();
+        const i = setInterval(() => {
+          if (_f !== old) {
+            clearInterval(i);
+            resolve();
+          }
+        }, 100);
+      });
       return;
     }
+
 
     // 🔹 If there's excess, require receipt number
     const totalNet = Object.values(_c).reduce((sum, i) => sum + (i.qty * i.price) / 1.12, 0);
@@ -1002,7 +959,7 @@ body.history-open #historyContainer {
       return;
     }
 
-    alert("Transaction saved successfully!");
+
     _c = {};
     _u = null;
     _f = false;
@@ -1016,76 +973,93 @@ body.history-open #historyContainer {
 
 
 <script>
-(function(){
+window._uc = async function () {
+  const cust =
+    customerSelect.value === "Others"
+      ? customerOther.value.trim()
+      : customerSelect.value;
 
-  let _ucCallbackId = 0;
+  if (!cust || !date.value) {
+    alert("Select customer & date");
+    return;
+  }
 
-  window._uc_jsonp_cb = function(payload, ctx){
-    try {
-      const { customer, monthKey } = ctx;
-      let usedCPCC = 0;
+  total.innerHTML = "Updating CPCC...";
 
-      (Array.isArray(payload) ? payload : payload.cpccData ?? []).forEach(r => {
-        const rowMonth =
-          new Date(r.date).getFullYear() + "-" +
-          (new Date(r.date).getMonth() + 1);
+  let res, text;
+  try {
+    res = await fetch(
+      HISTORY_URL + "?apiKey=" + encodeURIComponent(API_KEY),
+      { cache: "no-store" }
+    );
+  } catch {
+    alert("Failed to reach CPCC server.");
+    return;
+  }
 
-        if (r.outlet !== OUTLET_NAME) return;
-        if (r.customer !== customer) return;
-        if (rowMonth !== monthKey) return;
+  if (!res.ok) {
+    alert("CPCC server error: " + res.status);
+    return;
+  }
 
-        usedCPCC += Number(r.cpccPart) || 0;
-      });
+  try {
+    text = await res.text();
+  } catch {
+    alert("Failed to read CPCC response.");
+    return;
+  }
 
-      _u = usedCPCC;
-      _f = true;
-      _r();
-
-    } catch(e) {
-      console.error("CPCC JSONP ERROR:", e);
-      alert("Failed to update CPCC");
-    }
-  };
-
-  window._uc = function(){
-    const customer =
-      customerSelect.value === "Others"
-        ? customerOther.value.trim()
-        : customerSelect.value;
-
-    if (!customer || !date.value) {
-      alert("Select customer & date");
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    const m = text.match(/\{[\s\S]*\}/);
+    if (!m) {
+      alert("Invalid CPCC server response.");
       return;
     }
+    data = JSON.parse(m[0]);
+  }
 
-    total.innerHTML = "Updating CPCC...";
+  const rows = Array.isArray(data) ? data : [];
 
-    const d = new Date(date.value);
-    const monthKey = d.getFullYear() + "-" + (d.getMonth() + 1);
+  // 🔐 normalize selected month
+  const sd = new Date(date.value);
+  const selMonth =
+    sd.getFullYear() + "-" + (sd.getMonth() + 1);
 
-    const cbId = ++_ucCallbackId;
-    const cbName = `_uc_jsonp_cb_${cbId}`;
+  let used = 0;
 
-    window[cbName] = function(data){
-      window._uc_jsonp_cb(data, { customer, monthKey });
-      delete window[cbName];
-    };
+  rows.forEach(r => {
+    if (!r.customer || !r.date) return;
 
-    const s = document.createElement("script");
-    s.src =
-      HISTORY_URL +
-      "?apiKey=" + encodeURIComponent(API_KEY) +
-      "&callback=" + cbName;
+    // 🧼 normalize customer strings
+    const rowCustomer = String(r.customer).trim();
+    const selCustomer = cust.trim();
 
-    s.onerror = () => {
-      alert("Failed to reach CPCC server");
-      total.innerHTML = "";
-    };
+    if (rowCustomer !== selCustomer) return;
 
-    document.head.appendChild(s);
-  };
+    // 🗓 normalize row month
+    const rd = new Date(r.date);
+    const rowMonth =
+      rd.getFullYear() + "-" + (rd.getMonth() + 1);
 
-})();
+    if (rowMonth !== selMonth) return;
+
+    // 💰 backend-aligned CPCC usage
+    used += Number(r.cpccPart || r.lineTotal || 0);
+  });
+
+  // 🔁 sync to app state
+  window._u = used;   // CPCC used this month
+  window._f = true;   // CPCC fresh
+
+  // 🔄 refresh UI
+  if (typeof _r === "function") {
+    _r();
+  }
+};
+
 </script>
 
 
